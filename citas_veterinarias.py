@@ -9,6 +9,16 @@ import gradio as gr
 import pandas as pd
 
 # ======================================================================
+# EXCEPCIONES
+# ======================================================================
+
+class ReglaNegocioError(Exception):
+    """Se lanza cuando una operación incumple una regla de negocio.
+
+    El mensaje explica el motivo y es el que se muestra al usuario.
+    """
+
+# ======================================================================
 # MODELOS DEL DOMINIO
 # ======================================================================
 
@@ -137,67 +147,234 @@ class GestorCitas:
         self._contador_citas = 0
         self._contador_facturas = 0
 
-    # 1. Clínica -------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Utilidades de validación y búsqueda
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _texto(valor, campo: str) -> str:
+        if valor is None or not str(valor).strip():
+            raise ReglaNegocioError(f"El campo «{campo}» es obligatorio.")
+        return str(valor).strip()
+
+    @staticmethod
+    def _numero_positivo(valor, campo: str) -> float:
+        if valor is None or valor == "":
+            raise ReglaNegocioError(f"El campo «{campo}» es obligatorio.")
+        try:
+            numero = float(valor)
+        except (TypeError, ValueError):
+            raise ReglaNegocioError(f"El campo «{campo}» debe ser numérico.")
+        if numero <= 0:
+            raise ReglaNegocioError(f"El campo «{campo}» debe ser mayor que cero.")
+        return numero
+
+    def _clinica(self, nit) -> Clinica:
+        nit = self._texto(nit, "Clínica")
+        if nit not in self.clinicas:
+            raise ReglaNegocioError(f"No existe una clínica con NIT {nit}.")
+        return self.clinicas[nit]
+
+    def _propietario(self, clinica: Clinica, cedula) -> Propietario:
+        cedula = self._texto(cedula, "Propietario")
+        if cedula not in clinica.propietarios:
+            raise ReglaNegocioError(
+                f"No hay un propietario con cédula {cedula} en {clinica.nombre}.")
+        return clinica.propietarios[cedula]
+
+    def _mascota(self, propietario: Propietario, nombre) -> Mascota:
+        nombre = self._texto(nombre, "Mascota")
+        clave = Propietario.clave_mascota(nombre)
+        if clave not in propietario.mascotas:
+            raise ReglaNegocioError(
+                f"{propietario.nombre} no tiene una mascota llamada «{nombre}».")
+        return propietario.mascotas[clave]
+
+    def _veterinario(self, clinica: Clinica, cedula) -> Veterinario:
+        cedula = self._texto(cedula, "Veterinario")
+        if cedula not in clinica.veterinarios:
+            raise ReglaNegocioError(
+                f"No hay un veterinario con cédula {cedula} en {clinica.nombre}.")
+        return clinica.veterinarios[cedula]
+
+    def _servicio(self, clinica: Clinica, codigo) -> Servicio:
+        codigo = self._texto(codigo, "Servicio").upper()
+        if codigo not in clinica.servicios:
+            raise ReglaNegocioError(
+                f"El servicio «{codigo}» no está en el catálogo de {clinica.nombre}.")
+        return clinica.servicios[codigo]
+
+    def _cita(self, clinica: Clinica, codigo) -> Cita:
+        codigo = self._texto(codigo, "Cita")
+        for cita in clinica.citas:
+            if cita.codigo == codigo:
+                return cita
+        raise ReglaNegocioError(f"No existe la cita {codigo} en {clinica.nombre}.")
+
+    # ------------------------------------------------------------------
+    # 1. Registrar una clínica
+    # ------------------------------------------------------------------
     def registrar_clinica(self, nit, nombre, codigo_dane, municipio,
                           departamento, direccion, barrio) -> Clinica:
-        clinica = Clinica(str(nit).strip(), nombre, str(codigo_dane), municipio,
+        nit = self._texto(nit, "NIT")
+        nombre = self._texto(nombre, "Nombre")
+        codigo_dane = self._texto(codigo_dane, "Código DANE")
+        municipio = self._texto(municipio, "Municipio")
+        departamento = self._texto(departamento, "Departamento")
+        direccion = self._texto(direccion, "Dirección")
+        barrio = self._texto(barrio, "Barrio")
+        # Regla 7: no pueden existir dos clínicas con el mismo NIT
+        if nit in self.clinicas:
+            raise ReglaNegocioError(
+                f"Ya existe una clínica registrada con el NIT {nit} "
+                f"({self.clinicas[nit].nombre}).")
+        clinica = Clinica(nit, nombre, codigo_dane, municipio,
                           departamento, direccion, barrio)
-        self.clinicas[clinica.nit] = clinica
+        self.clinicas[nit] = clinica
         return clinica
 
-    # 2. Veterinarios y servicios --------------------------------------
-    def registrar_veterinario(self, nit, cedula, nombre, tarjeta_profesional) -> Veterinario:
-        veterinario = Veterinario(str(cedula).strip(), nombre, tarjeta_profesional)
-        self.clinicas[nit].veterinarios[veterinario.cedula] = veterinario
+    # ------------------------------------------------------------------
+    # 2. Registrar veterinarios y catálogo de servicios
+    # ------------------------------------------------------------------
+    def registrar_veterinario(self, nit, cedula, nombre,
+                              tarjeta_profesional) -> Veterinario:
+        clinica = self._clinica(nit)
+        cedula = self._texto(cedula, "Cédula")
+        nombre = self._texto(nombre, "Nombre")
+        tarjeta = self._texto(tarjeta_profesional, "Tarjeta profesional")
+        if cedula in clinica.veterinarios:
+            raise ReglaNegocioError(
+                f"Ya hay un veterinario con cédula {cedula} en {clinica.nombre}.")
+        veterinario = Veterinario(cedula, nombre, tarjeta)
+        clinica.veterinarios[cedula] = veterinario
         return veterinario
 
     def registrar_servicio(self, nit, codigo, nombre, tarifa) -> Servicio:
-        servicio = Servicio(str(codigo).strip().upper(), nombre, float(tarifa))
-        self.clinicas[nit].servicios[servicio.codigo] = servicio
+        clinica = self._clinica(nit)
+        codigo = self._texto(codigo, "Código").upper()
+        nombre = self._texto(nombre, "Nombre del servicio")
+        tarifa = self._numero_positivo(tarifa, "Tarifa")
+        # Regla 7: no pueden existir dos servicios con el mismo código
+        if codigo in clinica.servicios:
+            raise ReglaNegocioError(
+                f"Ya existe un servicio con código {codigo} en {clinica.nombre}.")
+        servicio = Servicio(codigo, nombre, tarifa)
+        clinica.servicios[codigo] = servicio
         return servicio
 
-    # 3. Propietarios y mascotas ---------------------------------------
-    def registrar_propietario(self, nit, cedula, nombre, telefono, municipio) -> Propietario:
-        propietario = Propietario(str(cedula).strip(), nombre, str(telefono), municipio)
-        self.clinicas[nit].propietarios[propietario.cedula] = propietario
+    # ------------------------------------------------------------------
+    # 3. Registrar propietarios y mascotas
+    # ------------------------------------------------------------------
+    def registrar_propietario(self, nit, cedula, nombre, telefono,
+                              municipio) -> Propietario:
+        clinica = self._clinica(nit)
+        cedula = self._texto(cedula, "Cédula")
+        nombre = self._texto(nombre, "Nombre")
+        telefono = self._texto(telefono, "Teléfono")
+        municipio = self._texto(municipio, "Municipio")
+        # Regla 7: no pueden existir dos propietarios con la misma cédula
+        if cedula in clinica.propietarios:
+            raise ReglaNegocioError(
+                f"Ya existe un propietario con cédula {cedula} en {clinica.nombre}.")
+        propietario = Propietario(cedula, nombre, telefono, municipio)
+        clinica.propietarios[cedula] = propietario
         return propietario
 
     def registrar_mascota(self, nit, cedula_propietario, nombre, especie, raza,
                           anio_nacimiento, peso) -> Mascota:
-        propietario = self.clinicas[nit].propietarios[cedula_propietario]
-        mascota = Mascota(nombre, especie, raza, int(anio_nacimiento), float(peso))
-        propietario.mascotas[Propietario.clave_mascota(nombre)] = mascota
+        clinica = self._clinica(nit)
+        propietario = self._propietario(clinica, cedula_propietario)
+        nombre = self._texto(nombre, "Nombre de la mascota")
+        especie = self._texto(especie, "Especie")
+        raza = self._texto(raza, "Raza")
+        anio = int(self._numero_positivo(anio_nacimiento, "Año de nacimiento"))
+        peso = self._numero_positivo(peso, "Peso")
+        if anio < 1990 or anio > date.today().year:
+            raise ReglaNegocioError(
+                f"El año de nacimiento debe estar entre 1990 y {date.today().year}.")
+        clave = Propietario.clave_mascota(nombre)
+        if clave in propietario.mascotas:
+            raise ReglaNegocioError(
+                f"{propietario.nombre} ya tiene una mascota llamada «{nombre}».")
+        mascota = Mascota(nombre, especie, raza, anio, peso)
+        propietario.mascotas[clave] = mascota
         return mascota
 
-    # 4. Programar cita ------------------------------------------------
+    # ------------------------------------------------------------------
+    # 4. Programar una cita
+    # ------------------------------------------------------------------
     def programar_cita(self, nit, cedula_propietario, nombre_mascota,
                        cedula_veterinario, codigo_servicio,
                        fecha: date, hora: time) -> Cita:
-        clinica = self.clinicas[nit]
-        propietario = clinica.propietarios[cedula_propietario]
-        mascota = propietario.mascotas[Propietario.clave_mascota(nombre_mascota)]
+        clinica = self._clinica(nit)
+        propietario = self._propietario(clinica, cedula_propietario)
+        mascota = self._mascota(propietario, nombre_mascota)
+        veterinario = self._veterinario(clinica, cedula_veterinario)
+        servicio = self._servicio(clinica, codigo_servicio)
+        if fecha is None or hora is None:
+            raise ReglaNegocioError("Debe indicar la fecha y la hora de la cita.")
+
+        # Reglas 2 y 3: ni el veterinario ni la mascota pueden tener otra cita
+        # (no cancelada) en la misma fecha y hora.
+        for otra in clinica.citas:
+            if otra.estado == CANCELADA or otra.fecha != fecha or otra.hora != hora:
+                continue
+            if otra.veterinario is veterinario:
+                raise ReglaNegocioError(
+                    f"El/la veterinario(a) {veterinario.nombre} ya tiene la cita "
+                    f"{otra.codigo} el {fecha.isoformat()} a las {hora:%H:%M}.")
+            if otra.mascota is mascota:
+                raise ReglaNegocioError(
+                    f"{mascota.nombre} ya tiene la cita {otra.codigo} el "
+                    f"{fecha.isoformat()} a las {hora:%H:%M}.")
+
+        # El código solo se consume cuando la cita fue aceptada
         self._contador_citas += 1
-        cita = Cita(f"CIT-{self._contador_citas:03d}", fecha, hora, propietario,
-                    mascota, clinica.veterinarios[cedula_veterinario],
-                    clinica.servicios[codigo_servicio.upper()])
+        cita = Cita(f"CIT-{self._contador_citas:03d}", fecha, hora,
+                    propietario, mascota, veterinario, servicio)
         clinica.citas.append(cita)
         return cita
 
-    # 5. Cancelar cita -------------------------------------------------
+    # ------------------------------------------------------------------
+    # 5. Cancelar una cita
+    # ------------------------------------------------------------------
     def cancelar_cita(self, nit, codigo_cita, fecha_actual: date) -> Cita:
-        cita = self._cita(nit, codigo_cita)
-        cita.estado = CANCELADA
+        clinica = self._clinica(nit)
+        cita = self._cita(clinica, codigo_cita)
+        # Regla 4: solo si está Programada y antes de la fecha de la cita
+        if cita.estado != PROGRAMADA:
+            raise ReglaNegocioError(
+                f"No se puede cancelar la cita {cita.codigo}: está en estado "
+                f"{cita.estado}. Solo se cancelan citas Programadas.")
+        if fecha_actual >= cita.fecha:
+            raise ReglaNegocioError(
+                f"No se puede cancelar la cita {cita.codigo}: debe cancelarse "
+                f"antes de su fecha ({cita.fecha.isoformat()}).")
+        cita.estado = CANCELADA   # no se elimina: queda en el historial
         return cita
 
-    # 6. Atender cita --------------------------------------------------
+    # ------------------------------------------------------------------
+    # 6. Atender una cita, agregar servicios y facturar
+    # ------------------------------------------------------------------
     def agregar_servicio_cita(self, nit, codigo_cita, codigo_servicio) -> Cita:
-        cita = self._cita(nit, codigo_cita)
-        cita.servicios_adicionales.append(self.clinicas[nit].servicios[codigo_servicio.upper()])
+        clinica = self._clinica(nit)
+        cita = self._cita(clinica, codigo_cita)
+        if cita.estado != PROGRAMADA:
+            raise ReglaNegocioError(
+                f"No se pueden agregar servicios a la cita {cita.codigo}: "
+                f"está en estado {cita.estado}.")
+        cita.servicios_adicionales.append(self._servicio(clinica, codigo_servicio))
         return cita
 
     def atender_cita(self, nit, codigo_cita) -> Factura:
-        cita = self._cita(nit, codigo_cita)
+        clinica = self._clinica(nit)
+        cita = self._cita(clinica, codigo_cita)
+        # Regla 5: solo se atienden citas Programadas
+        if cita.estado != PROGRAMADA:
+            raise ReglaNegocioError(
+                f"No se puede atender la cita {cita.codigo}: está en estado "
+                f"{cita.estado}. Solo se atienden citas Programadas.")
         self._contador_facturas += 1
+        # Regla 6: factura con número único, fecha, datos, detalle y total
         factura = Factura(f"FAC-{self._contador_facturas:03d}", cita.fecha,
                           cita.propietario, cita.mascota,
                           list(cita.todos_los_servicios()))
@@ -205,20 +382,22 @@ class GestorCitas:
         cita.estado = ATENDIDA
         return factura
 
-    # 7 y 8. Consultas -------------------------------------------------
+    # ------------------------------------------------------------------
+    # 7 y 8. Consultas
+    # ------------------------------------------------------------------
     def citas_por_fecha(self, nit, fecha: date) -> list[Cita]:
-        return sorted((c for c in self.clinicas[nit].citas if c.fecha == fecha),
+        clinica = self._clinica(nit)
+        if fecha is None:
+            raise ReglaNegocioError("Debe indicar la fecha a consultar.")
+        return sorted((c for c in clinica.citas if c.fecha == fecha),
                       key=lambda c: c.hora)
 
     def historial_mascota(self, nit, cedula_propietario, nombre_mascota) -> list[Cita]:
-        propietario = self.clinicas[nit].propietarios[cedula_propietario]
-        mascota = propietario.mascotas[Propietario.clave_mascota(nombre_mascota)]
-        return sorted((c for c in self.clinicas[nit].citas if c.mascota is mascota),
+        clinica = self._clinica(nit)
+        propietario = self._propietario(clinica, cedula_propietario)
+        mascota = self._mascota(propietario, nombre_mascota)
+        return sorted((c for c in clinica.citas if c.mascota is mascota),
                       key=lambda c: (c.fecha, c.hora))
-
-    # Auxiliar ---------------------------------------------------------
-    def _cita(self, nit, codigo) -> Cita:
-        return next(c for c in self.clinicas[nit].citas if c.codigo == codigo)
 
 # ======================================================================
 # DATOS DE EJEMPLO
@@ -313,8 +492,10 @@ def _ejecutar(accion, *args):
     """
     try:
         return True, accion(*args)
-    except Exception as e:  # en esta versión no hay validaciones propias
-        return False, f"Ocurrió un error: {e!r}"
+    except (ReglaNegocioError, ValueError) as e:
+        return False, str(e)
+    except Exception as e:  # cualquier otro error inesperado
+        return False, f"Ocurrió un error inesperado: {e}"
 
 
 def _fecha(texto: str) -> date:
@@ -406,6 +587,7 @@ def refrescar_todo(nit):
         _df(filas_servs, COLS_SERVS),                    # tbl_servs
         _df(filas_props, COLS_PROPS),                    # tbl_props
     )
+
 
 def cargar_mascotas(nit, cedula):
     c = _clinica(nit)
